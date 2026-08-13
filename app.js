@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.1.1';
+const VERSION = 'v1.1.2';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 
@@ -610,11 +610,14 @@ function renderSetup() {
   body.append(el('div', 'notice',
     'iOS 在儲存空間吃緊時會清掉網站資料。當天存到相簿，不要累積一整季在 App 裡。'));
 
-  const clear = el('button', 'btn ghost wide', '清除已存到相簿的照片');
+  body.append(el('div', 'notice calm',
+    '收工順序：① 通知全部發完 → ② 釋放空間 → ③ 結束這批 → ④ 回試算表把 R 欄改「已出貨」。\n下面兩顆都不會刪到 iOS 相簿裡的照片。'));
+
+  const clear = el('button', 'btn ghost wide', '釋放空間（刪除 App 內的照片副本）');
   clear.onclick = async () => {
     const gone = S.photos.filter(p => p.saved);
     if (!gone.length) { toast('沒有已存到相簿的照片'); return; }
-    if (!confirm(`要刪除 ${gone.length} 張已存到相簿的照片嗎？此動作無法復原。`)) return;
+    if (!confirm(`要刪除 App 裡的 ${gone.length} 張照片嗎？\n\n相簿裡那份不受影響，這只是清掉 App 內的副本以釋放空間。\n\n請先確認通知都發完了，刪除後這些訂單會從通知頁消失。`)) return;
     for (const p of gone) await dbDelPhoto(p.id);
     S.photos = S.photos.filter(p => !p.saved);
     renderSetup(); renderShoot(); renderNotify(); updateBadge();
@@ -623,9 +626,9 @@ function renderSetup() {
   body.append(clear);
 
   body.append(el('div', 'secTitle', '這批'));
-  const reset = el('button', 'btn ghost wide', '結束這批（清空臨時加入與發送標記）');
+  const reset = el('button', 'btn ghost wide', '結束這批（標記歸零）');
   reset.onclick = async () => {
-    if (!confirm('要清空「臨時加入」與「已發送」標記嗎？照片不會被刪除。')) return;
+    if (!confirm('要清空「臨時加入」與「已發送」標記嗎？\n\n照片與相簿都不受影響，只是把計數器歸零，準備開始下一批。')) return;
     S.extra = {}; S.sent = {};
     await kvSet('extra', S.extra); await kvSet('sent', S.sent);
     renderShoot(); renderNotify(); updateBadge();
