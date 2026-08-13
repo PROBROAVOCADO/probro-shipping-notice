@@ -1,9 +1,10 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.1.2';
+const VERSION = 'v1.2.0';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
+const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
 
 /* ── 設定 ──────────────────────────────────────────────── */
 const cfg = {
@@ -278,77 +279,51 @@ function pickBox(o) {
   document.body.append(wrap);
 }
 
-/* ── 相機 ──────────────────────────────────────────────── */
-async function startCamera(order, boxIdx) {
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 2560 }, height: { ideal: 2560 } },
-      audio: false
-    });
-  } catch (e) { toast('無法開啟相機。請在 Safari 允許相機權限。', 3600); return; }
+/* ── 相機：改用 iOS 原生相機介面 ──────────────────────────
+ * getUserMedia 在 iOS Safari 上沒有點擊對焦與曝光控制的 API，
+ * 拍出來的模糊照片會讓舉證失效。改走 <input capture>，
+ * 代價是每張多一次「使用照片」確認，換回對焦／亮度／完整解析度。
+ */
+let fileInput = null;
 
-  const cam = el('div'); cam.id = 'cam';
-  cam.innerHTML = `
-    <video playsinline autoplay muted></video>
-    <div id="flash"></div>
-    <div class="camTop">
-      <div class="nm" id="camName"></div>
-      <div class="it" id="camItems"></div>
-      <div class="sub" id="camSub"></div>
-    </div>
-    <div class="camBot">
-      <button class="camBtn" id="camClose">關閉</button>
-      <button class="shutter" id="camShot" aria-label="拍照"></button>
-      <img id="camThumb" alt="">
-    </div>`;
-  document.body.append(cam);
-
-  const video = cam.querySelector('video');
-  video.srcObject = stream;
-  S.cam = { order, boxIdx, stream, cam, video };
-  paintCamTarget();
-
-  cam.querySelector('#camClose').onclick = closeCamera;
-  cam.querySelector('#camShot').onclick = capture;
+function ensureInput() {
+  if (fileInput) return fileInput;
+  fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.setAttribute('capture', 'environment');
+  fileInput.style.display = 'none';
+  fileInput.addEventListener('change', onPicked);
+  document.body.append(fileInput);
+  return fileInput;
 }
 
-function paintCamTarget() {
+function startCamera(order, boxIdx) {
+  S.cam = { order, boxIdx };
+  const i = ensureInput();
+  i.value = '';          // 允許連續拍同一箱（重拍）
+  i.click();
+}
+
+async function onPicked(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file || !S.cam) return;
   const { order, boxIdx } = S.cam;
-  const box = order.boxes.find(b => b.idx === boxIdx) || order.boxes[0];
-  $('#camName').textContent  = order.name;
-  $('#camItems').textContent = box ? `${box.weight ? box.weight + '斤｜' : ''}${box.items}` : '';
-  $('#camSub').textContent   = order.boxCount > 1
-    ? `${order.shipShort} · 第 ${boxIdx} 箱／共 ${order.boxCount} 箱` : order.shipShort;
-  const last = photosOf(order.key).slice(-1)[0];
-  const th = $('#camThumb');
-  if (last) { th.src = URL.createObjectURL(last.stamped); th.style.visibility = 'visible'; }
-  else th.style.visibility = 'hidden';
-}
+  toast('處理中…', 8000);
 
-function closeCamera() {
-  if (!S.cam) return;
-  S.cam.stream.getTracks().forEach(t => t.stop());
-  S.cam.cam.remove();
-  S.cam = null;
-  renderShoot(); updateBadge();
-}
+  let img;
+  try { img = await loadImage(file); }
+  catch (err) { toast('讀取照片失敗，請再試一次', 3000); return; }
 
-async function capture() {
-  if (!S.cam) return;
-  const { order, boxIdx, video } = S.cam;
-  const w = video.videoWidth, h = video.videoHeight;
-  if (!w || !h) { toast('相機還沒準備好'); return; }
+  // 縮到長邊上限，維持比例
+  const scale = Math.min(1, MAX_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.round(img.naturalWidth * scale);
+  const h = Math.round(img.naturalHeight * scale);
 
   const cv = document.createElement('canvas');
   cv.width = w; cv.height = h;
   const ctx = cv.getContext('2d');
-  ctx.drawImage(video, 0, 0, w, h);
-
-  const f = $('#flash');
-  f.style.transition = 'none'; f.style.opacity = '.85';
-  requestAnimationFrame(() => { f.style.transition = 'opacity .3s'; f.style.opacity = '0'; });
-
+  ctx.drawImage(img, 0, 0, w, h);
   drawOverlay(ctx, w, h, overlayLines(order, boxIdx));
   const stamped = await toBlob(cv, 0.92);
 
@@ -366,12 +341,62 @@ async function capture() {
   rec.id = await dbPutPhoto(rec);
   S.photos.push(rec);
 
-  toast(old.length ? `已取代 第${boxIdx}箱` : `已拍 ${order.name} 第${boxIdx}箱`, 1200);
+  toast('');
+  showReview(order, boxIdx, rec);
+}
+
+function loadImage(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const im = new Image();
+    im.onload  = () => { URL.revokeObjectURL(url); res(im); };
+    im.onerror = () => { URL.revokeObjectURL(url); rej(new Error('decode')); };
+    im.src = url;
+  });
+}
+
+/* 拍完即看：當場確認對焦與疊字，不對就重拍 */
+function showReview(order, boxIdx, rec) {
+  document.querySelectorAll('.sheet').forEach(n => n.remove());
 
   const shot = shotBoxes(order.key);
   const next = order.boxes.find(b => !shot.has(b.idx));
-  if (next) { S.cam.boxIdx = next.idx; paintCamTarget(); }
-  else closeCamera();
+
+  const wrap = el('div', 'sheet');
+  const body = el('div', 'sheetBody');
+
+  const head = el('div', 'reviewHead');
+  head.append(el('span', 'nm', order.name));
+  head.append(el('span', 'meta', order.boxCount > 1
+    ? `第 ${boxIdx} 箱／共 ${order.boxCount} 箱　已拍 ${shot.size}/${order.boxCount}`
+    : '共 1 箱'));
+  body.append(head);
+
+  const img = el('img', 'reviewImg');
+  img.src = URL.createObjectURL(rec.stamped);
+  img.alt = '';
+  body.append(img);
+
+  body.append(el('p', '', '確認酪梨清晰、疊字正確再繼續。模糊就重拍。'));
+
+  const again = el('button', 'btn ghost wide', '重拍這箱');
+  again.style.marginBottom = '9px';
+  again.onclick = () => { wrap.remove(); startCamera(order, boxIdx); };
+  body.append(again);
+
+  if (next) {
+    const go = el('button', 'btn wide', `拍第 ${next.idx} 箱`);
+    go.style.marginBottom = '9px';
+    go.onclick = () => { wrap.remove(); startCamera(order, next.idx); };
+    body.append(go);
+  }
+
+  const done = el('button', next ? 'btn ghost wide' : 'btn wide', next ? '先回清單' : '完成');
+  done.onclick = () => { wrap.remove(); renderShoot(); updateBadge(); };
+  body.append(done);
+
+  wrap.append(body);
+  document.body.append(wrap);
 }
 
 const toBlob = (canvas, q) => new Promise(res => canvas.toBlob(res, 'image/jpeg', q));
