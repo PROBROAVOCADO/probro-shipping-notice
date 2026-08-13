@@ -77,6 +77,12 @@ nav#tabs button[aria-current="true"]{color:var(--leaf);font-weight:700}
 .field{width:100%;min-height:50px;padding:11px 14px;border:1px solid var(--line);
   border-radius:12px;background:var(--paper);margin-bottom:10px}
 .field:focus{outline:2px solid var(--leaf);outline-offset:-1px}
+.fieldWrap{position:relative}
+.fieldWrap .field{padding-right:66px}
+.eye{position:absolute;right:6px;top:50%;transform:translateY(-50%);
+  min-height:38px;padding:0 12px;border-radius:9px;font-size:14px;
+  color:var(--leaf);font-weight:700}
+.eye:active{background:var(--wash)}
 
 .notice{border-radius:12px;padding:11px 13px;margin-bottom:12px;font-size:14.5px;
   background:var(--alert-bg);border:1px solid #EDCFC9;color:#8A2119;font-weight:600}
