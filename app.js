@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.2.0';
+const VERSION = 'v1.2.1';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
@@ -61,7 +61,9 @@ const CIRCLE = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫';
 let toastTimer;
 function toast(msg, ms = 1900) {
   const t = $('#toast');
-  t.textContent = msg; t.classList.add('on');
+  t.textContent = msg;
+  t.classList.toggle('on', !!msg);
+  if (!msg) return;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove('on'), ms);
 }
@@ -309,49 +311,96 @@ async function onPicked(e) {
   const file = e.target.files && e.target.files[0];
   if (!file || !S.cam) return;
   const { order, boxIdx } = S.cam;
-  toast('處理中…', 8000);
+  const info = `${file.type || '未知格式'} ${(file.size / 1048576).toFixed(1)}MB`;
+  toast('處理中…', 30000);
 
-  let img;
-  try { img = await loadImage(file); }
-  catch (err) { toast('讀取照片失敗，請再試一次', 3000); return; }
+  try {
+    const src = await withTimeout(decodeImage(file), 25000, '解碼');
+    const sw = src.width || src.naturalWidth;
+    const sh = src.height || src.naturalHeight;
+    if (!sw || !sh) throw new Error('尺寸為 0');
 
-  // 縮到長邊上限，維持比例
-  const scale = Math.min(1, MAX_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
-  const w = Math.round(img.naturalWidth * scale);
-  const h = Math.round(img.naturalHeight * scale);
+    const scale = Math.min(1, MAX_EDGE / Math.max(sw, sh));
+    const w = Math.round(sw * scale), h = Math.round(sh * scale);
 
-  const cv = document.createElement('canvas');
-  cv.width = w; cv.height = h;
-  const ctx = cv.getContext('2d');
-  ctx.drawImage(img, 0, 0, w, h);
-  drawOverlay(ctx, w, h, overlayLines(order, boxIdx));
-  const stamped = await toBlob(cv, 0.92);
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    ctx.drawImage(src, 0, 0, w, h);
+    if (src.close) src.close();          // 釋放 ImageBitmap 記憶體
 
-  // 同一箱重拍 → 取代
-  const old = S.photos.filter(p => p.orderKey === order.key && p.boxIdx === boxIdx);
-  for (const p of old) await dbDelPhoto(p.id);
-  S.photos = S.photos.filter(p => !(p.orderKey === order.key && p.boxIdx === boxIdx));
+    drawOverlay(ctx, w, h, overlayLines(order, boxIdx));
+    const stamped = await withTimeout(encodeJpeg(cv, 0.92), 25000, '編碼');
 
-  const base = safeName(order.name) + '_' + order.phone3 + '_' + order.orderDate + '_' + order.key4
-             + (order.boxCount > 1 ? `_${boxIdx}of${order.boxCount}` : '');
-  const rec = {
-    orderKey: order.key, boxIdx, boxCount: order.boxCount, name: order.name,
-    ts: new Date().toISOString(), filename: base + '.jpg', stamped, saved: 0
-  };
-  rec.id = await dbPutPhoto(rec);
-  S.photos.push(rec);
+    const old = S.photos.filter(p => p.orderKey === order.key && p.boxIdx === boxIdx);
+    for (const p of old) await dbDelPhoto(p.id);
+    S.photos = S.photos.filter(p => !(p.orderKey === order.key && p.boxIdx === boxIdx));
 
-  toast('');
-  showReview(order, boxIdx, rec);
+    const base = safeName(order.name) + '_' + order.phone3 + '_' + order.orderDate + '_' + order.key4
+               + (order.boxCount > 1 ? `_${boxIdx}of${order.boxCount}` : '');
+    const rec = {
+      orderKey: order.key, boxIdx, boxCount: order.boxCount, name: order.name,
+      ts: new Date().toISOString(), filename: base + '.jpg', stamped, saved: 0
+    };
+    rec.id = await dbPutPhoto(rec);
+    S.photos.push(rec);
+
+    toast('');
+    showReview(order, boxIdx, rec);
+
+  } catch (err) {
+    // 失敗必須可見：講出卡在哪一步、檔案是什麼
+    toast(`照片處理失敗（${err.message}）\n${info}\n可到 設定→相機→格式 改成「相容性最佳」`, 7000);
+    renderShoot();
+  }
 }
 
-function loadImage(file) {
-  return new Promise((res, rej) => {
+/** 逾時保護：解碼失敗時 Image 的 onload/onerror 都可能不觸發，會永遠卡住 */
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(label + '逾時')), ms))
+  ]);
+}
+
+/** 先用 createImageBitmap（省記憶體、可處理 HEIC），失敗再退回 Image */
+async function decodeImage(file) {
+  if (window.createImageBitmap) {
+    try {
+      return await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch (e1) {
+      try { return await createImageBitmap(file); } catch (e2) { /* 落到下面 */ }
+    }
+  }
+  return await new Promise((res, rej) => {
     const url = URL.createObjectURL(file);
     const im = new Image();
     im.onload  = () => { URL.revokeObjectURL(url); res(im); };
-    im.onerror = () => { URL.revokeObjectURL(url); rej(new Error('decode')); };
+    im.onerror = () => { URL.revokeObjectURL(url); rej(new Error('無法解碼')); };
     im.src = url;
+  });
+}
+
+/** toBlob 在部分 iOS 版本上不觸發回呼，退回 toDataURL */
+function encodeJpeg(canvas, q) {
+  return new Promise((res, rej) => {
+    let settled = false;
+    try {
+      canvas.toBlob(b => {
+        if (settled) return;
+        settled = true;
+        b ? res(b) : rej(new Error('編碼結果為空'));
+      }, 'image/jpeg', q);
+    } catch (e) { /* 落到下面 */ }
+
+    setTimeout(async () => {
+      if (settled) return;
+      settled = true;
+      try {
+        const url = canvas.toDataURL('image/jpeg', q);
+        res(await (await fetch(url)).blob());
+      } catch (e) { rej(new Error('編碼失敗')); }
+    }, 4000);
   });
 }
 
