@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.2.1';
+const VERSION = 'v1.2.2';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
@@ -107,7 +107,7 @@ async function fetchOrders(silent) {
   if (!silent) toast('讀取中…', 8000);
 
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 20000);
+  const timer = setTimeout(() => ctl.abort(), 45000);   // GAS 冷啟動可能很慢
   try {
     const u = `${cfg.url}?action=list&token=${encodeURIComponent(cfg.token)}&t=${Date.now()}`;
     const r = await fetch(u, { signal: ctl.signal, redirect: 'follow' });
@@ -120,7 +120,7 @@ async function fetchOrders(silent) {
     toast(`已更新 ${j.orders.length} 筆`);
     return true;
   } catch (e) {
-    const msg = e.name === 'AbortError' ? '連線逾時' : (e.message || '連線失敗');
+    const msg = e.name === 'AbortError' ? '連線逾時（GAS 可能在冷啟動，再按一次通常就好）' : (e.message || '連線失敗');
     toast(S.orders.length ? `${msg}，沿用 ${fmtTime(S.fetchedAt)} 的資料` : `${msg}，且本機沒有可用資料`, 3400);
     return false;
   } finally {
@@ -656,8 +656,23 @@ function renderSetup() {
 
   body.append(el('div', 'secTitle', '連線'));
   const u = el('input', 'field'); u.placeholder = 'GAS 網頁應用程式網址'; u.value = cfg.url;
+  body.append(u);
+
+  const tWrap = el('div', 'fieldWrap');
   const t = el('input', 'field'); t.placeholder = 'SHIP_TOKEN'; t.value = cfg.token; t.type = 'password';
-  body.append(u, t);
+  t.autocapitalize = 'off'; t.autocorrect = 'off'; t.spellcheck = false;
+  const eye = el('button', 'eye', '顯示');
+  eye.onclick = () => {
+    const shown = t.type === 'text';
+    t.type = shown ? 'password' : 'text';
+    eye.textContent = shown ? '顯示' : '隱藏';
+  };
+  tWrap.append(t, eye);
+  body.append(tWrap);
+
+  const hint = el('div', 'tally');
+  hint.innerHTML = `<span>目前 token 長度 <b class="num">${cfg.token.length}</b> 字元</span>`;
+  body.append(hint);
 
   const save = el('button', 'btn wide', '儲存並測試連線');
   save.onclick = async () => {
