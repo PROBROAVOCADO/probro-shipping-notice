@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.1.0';
+const VERSION = 'v1.1.1';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 
@@ -475,7 +475,7 @@ function renderNotify() {
   body.append(bar);
 
   body.append(el('div', 'notice calm',
-    '按「傳送」會把文案複製到剪貼簿，並開啟分享選單帶著照片。到 LINE 選好聊天室送出照片後，長按輸入框貼上文案。'));
+    '「複製文案」把這筆文案放進剪貼簿，到 LINE 官方帳號長按輸入框貼上。「存相簿」把這筆照片送進相簿，再從聊天室的相簿鍵挑最新那幾張。'));
 
   const keys = [...new Set(S.photos.map(p => p.orderKey))];
   if (!keys.length) { body.append(el('div', 'empty', '還沒有拍過的照片。')); return; }
@@ -496,6 +496,7 @@ function notifyRow(key) {
 
   const img = el('img');
   img.src = URL.createObjectURL(ps[0].stamped); img.alt = '';
+  img.onclick = () => saveToPhotos(key);
   row.append(img);
 
   const main = el('div', 'rowMain');
@@ -509,19 +510,47 @@ function notifyRow(key) {
   row.append(main);
 
   const acts = el('div', 'rowActs');
-  const send = el('button', 'btn sm', sent ? '再傳一次' : '傳送');
-  send.onclick = () => shareOrder(key);
-  acts.append(send);
 
-  const mark = el('button', 'btn sm ghost', sent ? '取消標記' : '已傳送');
+  const copy = el('button', 'btn xs', '複製文案');
+  copy.onclick = () => copyMessage(key);
+  acts.append(copy);
+
+  const pic = el('button', 'btn xs ghost', ps.every(p => p.saved) ? '照片 ✓' : '存相簿');
+  pic.onclick = () => saveToPhotos(key);
+  acts.append(pic);
+
+  const mark = el('button', 'btn xs ghost', sent ? '取消標記' : '已傳送');
   mark.onclick = async () => {
     if (S.sent[key]) delete S.sent[key]; else S.sent[key] = new Date().toISOString();
     await kvSet('sent', S.sent);
     renderNotify(); updateBadge();
   };
   acts.append(mark);
+
   row.append(acts);
   return row;
+}
+
+/** 只複製文案，不動照片。複製成功即視為已處理，讓清單自我收斂。 */
+async function copyMessage(key) {
+  const o = S.orders.find(x => x.key === key);
+  if (!o) { toast('找不到訂單資料，請先重新抓取'); return; }
+  if (o.messageMissing) { toast('這筆沒有文案，請先修好試算表再重抓', 3000); return; }
+
+  try {
+    await navigator.clipboard.writeText(o.message);
+  } catch (e) {
+    // 少數情況剪貼簿 API 不可用 → 退回可手動選取的方式
+    const ta = document.createElement('textarea');
+    ta.value = o.message;
+    ta.style.cssText = 'position:fixed;top:50%;left:5%;width:90%;height:40%;z-index:99;font-size:15px';
+    document.body.append(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e2) {}
+    setTimeout(() => ta.remove(), 60);
+  }
+  if (!S.sent[key]) { S.sent[key] = new Date().toISOString(); await kvSet('sent', S.sent); }
+  renderNotify(); updateBadge();
+  toast(`已複製 ${o.name} 的文案`);
 }
 
 async function shareOrder(key) {
