@@ -275,6 +275,12 @@ function orderCard(o) {
   dots.append(el('span', 'num', `${shot.size}/${o.boxCount} 箱`));
   b.append(dots);
 
+  if (o.hasBoxDetail === false) {
+    const w = el('div', 'items', '⚠️ 這筆沒有裝箱明細，箱數與斤數是推估的，請先補 Q 欄');
+    w.style.color = 'var(--alert)';
+    w.style.fontWeight = '600';
+    b.append(w);
+  }
   b.append(el('div', 'items', o.boxes.map(x =>
     `${'①②③④⑤⑥⑦⑧⑨⑩'[x.idx - 1] || x.idx} ${x.weight ? x.weight + '斤｜' : ''}${x.items}`).join('\n')));
 
