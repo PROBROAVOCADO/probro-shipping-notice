@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.4.1';
+const VERSION = 'v1.5.0';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
@@ -842,30 +842,17 @@ function renderSetup() {
   body.append(s1, s2);
 
   body.append(el('div', 'notice',
-    'iOS 在儲存空間吃緊時會清掉網站資料。當天存到相簿，不要累積一整季在 App 裡。'));
-
-  body.append(el('div', 'notice calm',
-    '收工順序：① 通知全部發完 → ② 釋放空間 → ③ 結束這批 → ④ 回試算表把 R 欄改「已出貨」。\n下面兩顆都不會刪到 iOS 相簿裡的照片。'));
-
-  const clear = el('button', 'btn ghost wide', '釋放空間（刪除 App 內的照片副本）');
-  clear.onclick = async () => {
-    const gone = S.photos.filter(p => p.saved);
-    if (!gone.length) { toast('沒有已存到相簿的照片'); return; }
-    if (!confirm(`要刪除 App 裡的 ${gone.length} 張照片嗎？\n\n相簿裡那份不受影響，這只是清掉 App 內的副本以釋放空間。\n\n請先確認通知都發完了，刪除後這些訂單會從通知頁消失。`)) return;
-    for (const p of gone) await dbDelPhoto(p.id);
-    S.photos = S.photos.filter(p => !p.saved);
-    renderSetup(); renderShoot(); renderNotify(); updateBadge();
-    toast('已清除');
-  };
-  body.append(clear);
+    'iOS 在儲存空間吃緊時會清掉網站資料。當天存到相簿，不要累積一整季在 App 裡。\n存過相簿的副本會在收工時自動清掉，不需要手動處理。'));
 
   body.append(el('div', 'secTitle', '收工'));
 
   body.append(el('div', 'notice calm',
-    '這一批都寄出、通知也發完之後按下面這顆。它會做兩件事：\n' +
+    '這一批都寄出、通知也發完之後按下面這顆。它會依序做三件事：\n' +
     '① 把本批拍過照的訂單，在試算表 R 欄寫成「已出貨」\n' +
-    '② 寫入成功後，清空「臨時加入」與「已傳送」標記，讓下一批從乾淨狀態開始\n\n' +
-    '照片與相簿都不受影響。寫入失敗時標記不會被清掉，可以直接再按一次。'));
+    '② 清空「臨時加入」與「已傳送」標記\n' +
+    '③ 刪掉 App 內已存過相簿的照片副本，釋放空間\n\n' +
+    '相簿裡的照片不受影響。沒存過相簿的照片會被保留，不會刪。\n' +
+    '寫入失敗時什麼都不會動，可以直接再按一次。'));
 
   const bk = Object.keys(S.batch);
   const bstat = el('div', 'tally');
@@ -887,8 +874,15 @@ async function finishBatch(btn) {
   if (!cfg.ok) { toast('尚未設定連線'); return; }
 
   const 未傳 = keys.filter(k => !S.sent[k]).length;
-  const 警語 = 未傳 ? `\n\n注意：還有 ${未傳} 筆沒標記為已傳送，清掉後會失去發送進度。` : '';
-  if (!confirm(`要把這 ${keys.length} 筆在試算表寫成「已出貨」，並清空臨時加入與已傳送標記嗎？${警語}`)) return;
+  const 可刪 = S.photos.filter(p => p.saved).length;
+  const 保留 = S.photos.filter(p => !p.saved).length;
+
+  let 訊息 = `要完成這批的出貨作業嗎？\n\n`
+    + `· 試算表寫入「已出貨」：${keys.length} 筆\n`
+    + `· 刪除 App 內照片副本：${可刪} 張（相簿不受影響）`;
+  if (保留) 訊息 += `\n· 保留未存相簿的照片：${保留} 張`;
+  if (未傳) 訊息 += `\n\n⚠️ 還有 ${未傳} 筆沒標記為已傳送，清掉後會失去發送進度。`;
+  if (!confirm(訊息)) return;
 
   btn.disabled = true;
   const 原文 = btn.textContent;
@@ -913,13 +907,19 @@ async function finishBatch(btn) {
     await kvSet('sent', S.sent);
     await kvSet('batch', S.batch);
 
+    // 只刪已存過相簿的副本；沒存過的一律保留
+    const 待刪 = S.photos.filter(p => p.saved);
+    for (const p of 待刪) await dbDelPhoto(p.id);
+    S.photos = S.photos.filter(p => !p.saved);
+
     await fetchOrders(true);
     renderShoot(); renderNotify(); renderSetup(); updateBadge();
 
-    let msg = `已寫入 ${j.updated} 筆`;
-    if (j.already) msg += `，${j.already} 筆本來就是已出貨`;
+    let msg = `已寫入 ${j.updated} 筆，清掉 ${待刪.length} 張照片副本`;
+    if (j.already) msg += `\n${j.already} 筆本來就是已出貨`;
+    if (S.photos.length) msg += `\n保留 ${S.photos.length} 張未存相簿的照片`;
     if (j.notFound) msg += `\n⚠️ 有 ${j.notFound} 筆在試算表找不到，請人工確認`;
-    toast(msg, j.notFound ? 6000 : 2600);
+    toast(msg, (j.notFound || S.photos.length) ? 6000 : 2800);
 
   } catch (e) {
     const m = e.name === 'AbortError' ? '連線逾時' : (e.message || '連線失敗');
