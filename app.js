@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.3.0';
+const VERSION = 'v1.3.1';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
@@ -30,7 +30,9 @@ const cfg = {
 /* ── IndexedDB ─────────────────────────────────────────── */
 function openDB() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open('bobo-ship', 1);
+    // v1.3.1 起資料庫更名為 probro-ship。舊的 bobo-ship 不會被讀取，
+    // 升級前請先把 App 內的照片存到相簿。
+    const r = indexedDB.open('probro-ship', 1);
     r.onupgradeneeded = e => {
       const d = e.target.result;
       if (!d.objectStoreNames.contains('photos')) {
