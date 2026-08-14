@@ -130,7 +130,10 @@ nav#tabs button[aria-current="true"]{color:var(--leaf);font-weight:700}
 .stage{position:relative;display:inline-block;width:100%;touch-action:none;
   user-select:none;-webkit-user-select:none;margin-bottom:8px}
 .ovBox{position:absolute;background:#FFF;color:#1A1A1A;text-align:center;
-  box-shadow:0 0 0 2px rgba(111,154,70,.55);pointer-events:none;white-space:nowrap}
+  box-shadow:0 0 0 2px var(--leaf);pointer-events:none;white-space:nowrap}
+.stage::after{content:'可拖曳';position:absolute;right:8px;top:8px;
+  background:rgba(62,50,38,.72);color:#fff;font-size:11px;font-weight:700;
+  padding:3px 8px;border-radius:7px;pointer-events:none}
 .ovLine{white-space:nowrap}
 .hintLine{font-size:12.5px;color:var(--muted);margin:0 0 10px}
 
