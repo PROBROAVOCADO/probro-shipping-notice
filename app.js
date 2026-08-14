@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.5.0';
+const VERSION = 'v1.5.1';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
@@ -121,6 +121,7 @@ async function fetchOrders(silent) {
   if (!cfg.ok) { toast('尚未設定連線'); go('s-setup'); return false; }
   if (!silent) toast('讀取中…', 8000);
 
+  const t0 = Date.now();
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 45000);   // GAS 冷啟動可能很慢
   try {
@@ -132,7 +133,9 @@ async function fetchOrders(silent) {
     S.orders = j.orders; S.fetchedAt = j.fetchedAt;
     await kvSet('orders', { orders: j.orders, fetchedAt: j.fetchedAt });
     renderShoot(); renderNotify(); updateBadge();
-    toast(`已更新 ${j.orders.length} 筆`);
+    // 顯示往返總耗時與後端耗時，兩者差距就是 Google 那段的固定成本
+    const 往返 = Date.now() - t0;
+    toast(`已更新 ${j.orders.length} 筆（${(往返 / 1000).toFixed(1)} 秒${j.elapsedMs ? '，後端 ' + j.elapsedMs + 'ms' : ''}）`);
     return true;
   } catch (e) {
     const msg = e.name === 'AbortError' ? '連線逾時（GAS 可能在冷啟動，再按一次通常就好）' : (e.message || '連線失敗');
