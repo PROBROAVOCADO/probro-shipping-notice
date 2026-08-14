@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.4.0';
+const VERSION = 'v1.4.1';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
@@ -859,18 +859,22 @@ function renderSetup() {
   };
   body.append(clear);
 
-  body.append(el('div', 'secTitle', '這批'));
+  body.append(el('div', 'secTitle', '收工'));
+
+  body.append(el('div', 'notice calm',
+    '這一批都寄出、通知也發完之後按下面這顆。它會做兩件事：\n' +
+    '① 把本批拍過照的訂單，在試算表 R 欄寫成「已出貨」\n' +
+    '② 寫入成功後，清空「臨時加入」與「已傳送」標記，讓下一批從乾淨狀態開始\n\n' +
+    '照片與相簿都不受影響。寫入失敗時標記不會被清掉，可以直接再按一次。'));
 
   const bk = Object.keys(S.batch);
   const bstat = el('div', 'tally');
   bstat.innerHTML = `<span>本批已拍 <b class="num">${bk.length}</b> 筆訂單</span>`;
   body.append(bstat);
 
-  const reset = el('button', 'btn wide', '結束這批');
+  const reset = el('button', 'btn wide', '完成出貨作業');
   reset.onclick = () => finishBatch(reset);
   body.append(reset);
-  body.append(el('div', 'notice calm',
-    '會先把本批拍過照的訂單，在試算表 R 欄寫成「已出貨」；寫入成功才清空臨時加入與已傳送標記。\n寫入失敗時標記不會被清掉，可以直接再按一次。'));
 
   body.append(el('div', 'secTitle', '版本'));
   body.append(el('div', 'notice calm', `${VERSION}　更新後需完全關閉 App 再開啟才會生效。`));
