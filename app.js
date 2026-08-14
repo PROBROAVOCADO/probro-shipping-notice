@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.3.1';
+const VERSION = 'v1.3.2';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
@@ -423,7 +423,7 @@ function encodeJpeg(canvas, q) {
 }
 
 /* 拍完即看：確認對焦與疊字。疊字可拖曳移動、雙指縮放，位置會被記住 */
-function showReview(order, boxIdx, rec, base) {
+async function showReview(order, boxIdx, rec, base) {
   document.querySelectorAll('.sheet').forEach(n => n.remove());
 
   const lines = overlayLines(order, boxIdx);
@@ -440,93 +440,14 @@ function showReview(order, boxIdx, rec, base) {
     : '共 1 箱'));
   body.append(head);
 
-  // 預覽區：底圖 + 可拖曳的疊字方塊
   const stage = el('div', 'stage');
   const img = el('img', 'reviewImg');
-  img.src = base.toDataURL('image/jpeg', 0.7);   // 預覽用低畫質即可
   img.alt = '';
   const ovBox = el('div', 'ovBox');
   stage.append(img, ovBox);
   body.append(stage);
 
-  body.append(el('p', 'hintLine', '單指拖曳移動疊字，雙指縮放大小。調整後會記住，套用到後面的照片。'));
-
-  function paint() {
-    const iw = img.clientWidth, ih = img.clientHeight;
-    if (!iw) return;
-    const probe = document.createElement('canvas').getContext('2d');
-    const m = overlayMetrics(probe, iw, lines, pos.r);
-    ovBox.innerHTML = '';
-    ovBox.style.font = ovFace(m.font);
-    ovBox.style.padding = `${m.pad * 0.55}px ${m.pad}px`;
-    ovBox.style.borderRadius = m.r + 'px';
-    ovBox.style.lineHeight = m.lh + 'px';
-    m.out.forEach(t => ovBox.append(el('div', 'ovLine', t)));
-    const bx = Math.max(0, Math.min(iw - m.bw, pos.cx * iw - m.bw / 2));
-    const by = Math.max(0, Math.min(ih - m.bh, pos.y * ih));
-    ovBox.style.left = bx + 'px';
-    ovBox.style.top  = by + 'px';
-  }
-  img.onload = paint;
-  if (img.complete) setTimeout(paint, 0);
-
-  // 手勢
-  let mode = null, startX = 0, startY = 0, startCX = 0, startY0 = 0, startDist = 0, startR = 0;
-  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
-
-  stage.addEventListener('touchstart', e => {
-    if (e.touches.length === 1) {
-      mode = 'move';
-      startX = e.touches[0].clientX; startY = e.touches[0].clientY;
-      startCX = pos.cx; startY0 = pos.y;
-    } else if (e.touches.length === 2) {
-      mode = 'zoom'; startDist = dist(e.touches); startR = pos.r;
-    }
-    e.preventDefault();
-  }, { passive: false });
-
-  stage.addEventListener('touchmove', e => {
-    const iw = img.clientWidth, ih = img.clientHeight;
-    if (mode === 'move' && e.touches.length === 1) {
-      pos.cx = Math.max(0, Math.min(1, startCX + (e.touches[0].clientX - startX) / iw));
-      pos.y  = Math.max(0, Math.min(1, startY0 + (e.touches[0].clientY - startY) / ih));
-      paint();
-    } else if (mode === 'zoom' && e.touches.length === 2) {
-      const k = dist(e.touches) / (startDist || 1);
-      pos.r = Math.max(OV_MIN, Math.min(OV_MAX, startR * k));
-      paint();
-    }
-    e.preventDefault();
-  }, { passive: false });
-
-  stage.addEventListener('touchend', () => {
-    if (!mode) return;
-    mode = null;
-    ov.save(pos.cx, pos.y, pos.r);
-    rerender();
-  });
-
-  // 手勢結束後才重繪高解析度版本並覆蓋資料庫
-  let busy = false;
-  async function rerender() {
-    if (busy) return;
-    busy = true;
-    try {
-      const cv = document.createElement('canvas');
-      cv.width = base.width; cv.height = base.height;
-      const ctx = cv.getContext('2d');
-      ctx.drawImage(base, 0, 0);
-      drawOverlay(ctx, cv.width, cv.height, lines, pos);
-      const blob = await withTimeout(encodeJpeg(cv, 0.92), 25000, '編碼');
-      rec.stamped = blob;
-      rec.saved = 0;                     // 內容變了，要重新存相簿
-      await dbPutPhoto(rec);
-      const i = S.photos.findIndex(p => p.id === rec.id);
-      if (i >= 0) S.photos[i] = rec;
-    } catch (e) {
-      toast('重繪失敗：' + e.message, 3000);
-    } finally { busy = false; }
-  }
+  body.append(el('p', 'hintLine', '拖曳疊字可移動，雙指縮放可改大小（電腦上用滑鼠拖曳、滾輪縮放）。調整後會記住，套用到後面的照片。'));
 
   const tools = el('div', 'bar');
   const reset = el('button', 'btn xs ghost', '回到預設位置');
@@ -543,7 +464,7 @@ function showReview(order, boxIdx, rec, base) {
   if (next) {
     const go = el('button', 'btn wide', `拍第 ${next.idx} 箱`);
     go.style.marginBottom = '9px';
-    go.onclick = () => { wrap.remove(); startCamera(order, next.idx); };
+    go.onclick = () => { wrap.remove(); renderShoot(); startCamera(order, next.idx); };
     body.append(go);
   }
 
@@ -552,7 +473,110 @@ function showReview(order, boxIdx, rec, base) {
   body.append(done);
 
   wrap.append(body);
-  document.body.append(wrap);
+  document.body.append(wrap);          // ← 先進畫面，之後量到的寬度才不是 0
+
+  // 預覽底圖（無疊字）。用 blob URL 而非 dataURL，省記憶體也快得多。
+  try {
+    const previewBlob = await encodeJpeg(base, 0.7);
+    img.src = URL.createObjectURL(previewBlob);
+  } catch (e) { img.src = base.toDataURL('image/jpeg', 0.7); }
+
+  /* 量得到寬度才畫，量不到就下一影格再試，最多兩秒 */
+  let tries = 0;
+  function paint() {
+    const iw = img.clientWidth, ih = img.clientHeight;
+    if (!iw || !ih) {
+      if (tries++ < 120) requestAnimationFrame(paint);
+      else toast('預覽載入異常，照片已存檔，可先繼續', 3000);
+      return;
+    }
+    const probe = document.createElement('canvas').getContext('2d');
+    const m = overlayMetrics(probe, iw, lines, pos.r);
+    ovBox.innerHTML = '';
+    ovBox.style.font = ovFace(m.font);
+    ovBox.style.lineHeight = m.lh + 'px';
+    ovBox.style.padding = `${m.pad * 0.55}px ${m.pad}px`;
+    ovBox.style.borderRadius = m.r + 'px';
+    m.out.forEach(t => ovBox.append(el('div', 'ovLine', t)));
+    ovBox.style.left = Math.max(0, Math.min(iw - m.bw, pos.cx * iw - m.bw / 2)) + 'px';
+    ovBox.style.top  = Math.max(0, Math.min(ih - m.bh, pos.y * ih)) + 'px';
+  }
+  img.addEventListener('load', () => { tries = 0; paint(); });
+  paint();
+
+  /* 手勢：用 Pointer Events，滑鼠與觸控同一套 */
+  const pts = new Map();
+  let startCX = 0, startY0 = 0, startR = 0, startDist = 0, startX = 0, startY = 0;
+  const gap = () => {
+    const a = [...pts.values()];
+    return Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y);
+  };
+
+  stage.addEventListener('pointerdown', e => {
+    stage.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 1) {
+      startX = e.clientX; startY = e.clientY; startCX = pos.cx; startY0 = pos.y;
+    } else if (pts.size === 2) {
+      startDist = gap(); startR = pos.r;
+    }
+    e.preventDefault();
+  });
+
+  stage.addEventListener('pointermove', e => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const iw = img.clientWidth, ih = img.clientHeight;
+    if (pts.size === 1) {
+      pos.cx = Math.max(0, Math.min(1, startCX + (e.clientX - startX) / iw));
+      pos.y  = Math.max(0, Math.min(1, startY0 + (e.clientY - startY) / ih));
+    } else if (pts.size === 2 && startDist) {
+      pos.r = Math.max(OV_MIN, Math.min(OV_MAX, startR * (gap() / startDist)));
+    }
+    paint();
+    e.preventDefault();
+  });
+
+  function endPointer(e) {
+    if (!pts.has(e.pointerId)) return;
+    pts.delete(e.pointerId);
+    if (pts.size === 0) { ov.save(pos.cx, pos.y, pos.r); rerender(); }
+  }
+  stage.addEventListener('pointerup', endPointer);
+  stage.addEventListener('pointercancel', endPointer);
+
+  // 電腦測試用：滾輪縮放
+  stage.addEventListener('wheel', e => {
+    pos.r = Math.max(OV_MIN, Math.min(OV_MAX, pos.r * (e.deltaY > 0 ? 0.94 : 1.06)));
+    paint();
+    clearTimeout(stage._wt);
+    stage._wt = setTimeout(() => { ov.save(pos.cx, pos.y, pos.r); rerender(); }, 400);
+    e.preventDefault();
+  }, { passive: false });
+
+  /* 手勢結束後才重繪高解析度版本並覆蓋資料庫 */
+  let busy = false, again2 = false;
+  async function rerender() {
+    if (busy) { again2 = true; return; }
+    busy = true;
+    try {
+      const cv = document.createElement('canvas');
+      cv.width = base.width; cv.height = base.height;
+      const ctx = cv.getContext('2d');
+      ctx.drawImage(base, 0, 0);
+      drawOverlay(ctx, cv.width, cv.height, lines, pos);
+      rec.stamped = await withTimeout(encodeJpeg(cv, 0.92), 25000, '編碼');
+      rec.saved = 0;                    // 內容變了，要重新存相簿
+      await dbPutPhoto(rec);
+      const i = S.photos.findIndex(p => p.id === rec.id);
+      if (i >= 0) S.photos[i] = rec;
+    } catch (e) {
+      toast('重繪失敗：' + e.message, 3000);
+    } finally {
+      busy = false;
+      if (again2) { again2 = false; rerender(); }
+    }
+  }
 }
 
 const toBlob = (canvas, q) => new Promise(res => canvas.toBlob(res, 'image/jpeg', q));
