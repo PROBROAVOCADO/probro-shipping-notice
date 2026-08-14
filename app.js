@@ -1,10 +1,22 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.2.2';
+const VERSION = 'v1.3.0';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
+const OV_MIN = 0.022, OV_MAX = 0.085;   // 字級比例上下限
+
+/* 疊字位置／字級：拖曳調整後記住，成為後續照片的預設 */
+const ov = {
+  get cx()  { return parseFloat(localStorage.getItem('ovCX')) || 0.5; },
+  get y()   { const v = parseFloat(localStorage.getItem('ovY')); return isNaN(v) ? 0.035 : v; },
+  get r()   { return parseFloat(localStorage.getItem('ovR')) || FONT_RATIO; },
+  save(cx, y, r) {
+    localStorage.setItem('ovCX', cx); localStorage.setItem('ovY', y); localStorage.setItem('ovR', r);
+  },
+  reset() { ['ovCX', 'ovY', 'ovR'].forEach(k => localStorage.removeItem(k)); }
+};
 
 /* ── 設定 ──────────────────────────────────────────────── */
 const cfg = {
@@ -323,12 +335,16 @@ async function onPicked(e) {
     const scale = Math.min(1, MAX_EDGE / Math.max(sw, sh));
     const w = Math.round(sw * scale), h = Math.round(sh * scale);
 
+    // 底圖（無疊字）留在記憶體，供這次預覽拖曳時重繪用，不寫進資料庫
+    const base = document.createElement('canvas');
+    base.width = w; base.height = h;
+    base.getContext('2d').drawImage(src, 0, 0, w, h);
+    if (src.close) src.close();          // 釋放 ImageBitmap 記憶體
+
     const cv = document.createElement('canvas');
     cv.width = w; cv.height = h;
     const ctx = cv.getContext('2d');
-    ctx.drawImage(src, 0, 0, w, h);
-    if (src.close) src.close();          // 釋放 ImageBitmap 記憶體
-
+    ctx.drawImage(base, 0, 0);
     drawOverlay(ctx, w, h, overlayLines(order, boxIdx));
     const stamped = await withTimeout(encodeJpeg(cv, 0.92), 25000, '編碼');
 
@@ -336,17 +352,17 @@ async function onPicked(e) {
     for (const p of old) await dbDelPhoto(p.id);
     S.photos = S.photos.filter(p => !(p.orderKey === order.key && p.boxIdx === boxIdx));
 
-    const base = safeName(order.name) + '_' + order.phone3 + '_' + order.orderDate + '_' + order.key4
+    const fname = safeName(order.name) + '_' + order.phone3 + '_' + order.orderDate + '_' + order.key4
                + (order.boxCount > 1 ? `_${boxIdx}of${order.boxCount}` : '');
     const rec = {
       orderKey: order.key, boxIdx, boxCount: order.boxCount, name: order.name,
-      ts: new Date().toISOString(), filename: base + '.jpg', stamped, saved: 0
+      ts: new Date().toISOString(), filename: fname + '.jpg', stamped, saved: 0
     };
     rec.id = await dbPutPhoto(rec);
     S.photos.push(rec);
 
     toast('');
-    showReview(order, boxIdx, rec);
+    showReview(order, boxIdx, rec, base);
 
   } catch (err) {
     // 失敗必須可見：講出卡在哪一步、檔案是什麼
@@ -404,35 +420,124 @@ function encodeJpeg(canvas, q) {
   });
 }
 
-/* 拍完即看：當場確認對焦與疊字，不對就重拍 */
-function showReview(order, boxIdx, rec) {
+/* 拍完即看：確認對焦與疊字。疊字可拖曳移動、雙指縮放，位置會被記住 */
+function showReview(order, boxIdx, rec, base) {
   document.querySelectorAll('.sheet').forEach(n => n.remove());
 
-  const shot = shotBoxes(order.key);
-  const next = order.boxes.find(b => !shot.has(b.idx));
+  const lines = overlayLines(order, boxIdx);
+  const pos = { cx: ov.cx, y: ov.y, r: ov.r };
 
   const wrap = el('div', 'sheet');
   const body = el('div', 'sheetBody');
 
   const head = el('div', 'reviewHead');
   head.append(el('span', 'nm', order.name));
+  const shot = shotBoxes(order.key);
   head.append(el('span', 'meta', order.boxCount > 1
     ? `第 ${boxIdx} 箱／共 ${order.boxCount} 箱　已拍 ${shot.size}/${order.boxCount}`
     : '共 1 箱'));
   body.append(head);
 
+  // 預覽區：底圖 + 可拖曳的疊字方塊
+  const stage = el('div', 'stage');
   const img = el('img', 'reviewImg');
-  img.src = URL.createObjectURL(rec.stamped);
+  img.src = base.toDataURL('image/jpeg', 0.7);   // 預覽用低畫質即可
   img.alt = '';
-  body.append(img);
+  const ovBox = el('div', 'ovBox');
+  stage.append(img, ovBox);
+  body.append(stage);
 
-  body.append(el('p', '', '確認酪梨清晰、疊字正確再繼續。模糊就重拍。'));
+  body.append(el('p', 'hintLine', '單指拖曳移動疊字，雙指縮放大小。調整後會記住，套用到後面的照片。'));
+
+  function paint() {
+    const iw = img.clientWidth, ih = img.clientHeight;
+    if (!iw) return;
+    const probe = document.createElement('canvas').getContext('2d');
+    const m = overlayMetrics(probe, iw, lines, pos.r);
+    ovBox.innerHTML = '';
+    ovBox.style.font = ovFace(m.font);
+    ovBox.style.padding = `${m.pad * 0.55}px ${m.pad}px`;
+    ovBox.style.borderRadius = m.r + 'px';
+    ovBox.style.lineHeight = m.lh + 'px';
+    m.out.forEach(t => ovBox.append(el('div', 'ovLine', t)));
+    const bx = Math.max(0, Math.min(iw - m.bw, pos.cx * iw - m.bw / 2));
+    const by = Math.max(0, Math.min(ih - m.bh, pos.y * ih));
+    ovBox.style.left = bx + 'px';
+    ovBox.style.top  = by + 'px';
+  }
+  img.onload = paint;
+  if (img.complete) setTimeout(paint, 0);
+
+  // 手勢
+  let mode = null, startX = 0, startY = 0, startCX = 0, startY0 = 0, startDist = 0, startR = 0;
+  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+
+  stage.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+      mode = 'move';
+      startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+      startCX = pos.cx; startY0 = pos.y;
+    } else if (e.touches.length === 2) {
+      mode = 'zoom'; startDist = dist(e.touches); startR = pos.r;
+    }
+    e.preventDefault();
+  }, { passive: false });
+
+  stage.addEventListener('touchmove', e => {
+    const iw = img.clientWidth, ih = img.clientHeight;
+    if (mode === 'move' && e.touches.length === 1) {
+      pos.cx = Math.max(0, Math.min(1, startCX + (e.touches[0].clientX - startX) / iw));
+      pos.y  = Math.max(0, Math.min(1, startY0 + (e.touches[0].clientY - startY) / ih));
+      paint();
+    } else if (mode === 'zoom' && e.touches.length === 2) {
+      const k = dist(e.touches) / (startDist || 1);
+      pos.r = Math.max(OV_MIN, Math.min(OV_MAX, startR * k));
+      paint();
+    }
+    e.preventDefault();
+  }, { passive: false });
+
+  stage.addEventListener('touchend', () => {
+    if (!mode) return;
+    mode = null;
+    ov.save(pos.cx, pos.y, pos.r);
+    rerender();
+  });
+
+  // 手勢結束後才重繪高解析度版本並覆蓋資料庫
+  let busy = false;
+  async function rerender() {
+    if (busy) return;
+    busy = true;
+    try {
+      const cv = document.createElement('canvas');
+      cv.width = base.width; cv.height = base.height;
+      const ctx = cv.getContext('2d');
+      ctx.drawImage(base, 0, 0);
+      drawOverlay(ctx, cv.width, cv.height, lines, pos);
+      const blob = await withTimeout(encodeJpeg(cv, 0.92), 25000, '編碼');
+      rec.stamped = blob;
+      rec.saved = 0;                     // 內容變了，要重新存相簿
+      await dbPutPhoto(rec);
+      const i = S.photos.findIndex(p => p.id === rec.id);
+      if (i >= 0) S.photos[i] = rec;
+    } catch (e) {
+      toast('重繪失敗：' + e.message, 3000);
+    } finally { busy = false; }
+  }
+
+  const tools = el('div', 'bar');
+  const reset = el('button', 'btn xs ghost', '回到預設位置');
+  reset.onclick = () => { ov.reset(); pos.cx = ov.cx; pos.y = ov.y; pos.r = ov.r; paint(); rerender(); };
+  tools.append(reset);
+  body.append(tools);
 
   const again = el('button', 'btn ghost wide', '重拍這箱');
   again.style.marginBottom = '9px';
   again.onclick = () => { wrap.remove(); startCamera(order, boxIdx); };
   body.append(again);
 
+  const next = order.boxes.find(b => !shot.has(b.idx));
   if (next) {
     const go = el('button', 'btn wide', `拍第 ${next.idx} 箱`);
     go.style.marginBottom = '9px';
@@ -459,15 +564,8 @@ function overlayLines(o, boxIdx) {
   return lines;
 }
 
-function drawOverlay(ctx, w, h, lines) {
-  const font = Math.round(w * FONT_RATIO);
-  const pad  = font * 0.62;
-  const lh   = font * 1.34;
-  const r    = font * 0.28;
-  const face = `700 ${font}px "Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif`;
-  ctx.font = face;
-
-  const maxW = w * 0.9 - pad * 2;
+/** 依字寬把過長的行以「、」為界拆開，Canvas 與預覽共用同一份結果 */
+function wrapLines(ctx, lines, maxW) {
   const out = [];
   lines.forEach(line => {
     if (ctx.measureText(line).width <= maxW) { out.push(line); return; }
@@ -479,21 +577,38 @@ function drawOverlay(ctx, w, h, lines) {
     });
     if (cur) out.push(cur);
   });
+  return out;
+}
 
+const ovFace = px => `700 ${px}px "Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif`;
+
+/** 回傳疊字方塊的實際尺寸與換行結果（預覽與繪製共用） */
+function overlayMetrics(ctx, w, lines, ratio) {
+  const font = Math.max(10, Math.round(w * ratio));
+  const pad = font * 0.62, lh = font * 1.34, r = font * 0.28;
+  ctx.font = ovFace(font);
+  const out = wrapLines(ctx, lines, w * 0.9 - pad * 2);
   const bw = Math.min(w * 0.94, Math.max(...out.map(t => ctx.measureText(t).width)) + pad * 2);
   const bh = lh * out.length + pad * 1.1;
-  const x  = (w - bw) / 2;
-  const y  = h * 0.035;
+  return { font, pad, lh, r, out, bw, bh };
+}
+
+function drawOverlay(ctx, w, h, lines, pos) {
+  const p = pos || { cx: ov.cx, y: ov.y, r: ov.r };
+  const m = overlayMetrics(ctx, w, lines, p.r);
+
+  const x = Math.max(0, Math.min(w - m.bw, p.cx * w - m.bw / 2));
+  const y = Math.max(0, Math.min(h - m.bh, p.y * h));
 
   ctx.fillStyle = '#FFFFFF';
-  roundRect(ctx, x, y, bw, bh, r);
+  roundRect(ctx, x, y, m.bw, m.bh, m.r);
   ctx.fill();
 
   ctx.fillStyle = '#1A1A1A';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.font = face;
-  out.forEach((t, i) => ctx.fillText(t, w / 2, y + pad * 0.55 + lh * (i + 0.5)));
+  ctx.font = ovFace(m.font);
+  m.out.forEach((t, i) => ctx.fillText(t, x + m.bw / 2, y + m.pad * 0.55 + m.lh * (i + 0.5)));
   ctx.textAlign = 'start';
   ctx.textBaseline = 'alphabetic';
 }
