@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.3.2';
+const VERSION = 'v1.4.0';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
@@ -63,7 +63,7 @@ const kvSet = (k, v) => tx('kv', 'readwrite', s => s.put(v, k));
 /* ── 狀態 ──────────────────────────────────────────────── */
 const S = {
   orders: [], fetchedAt: null, photos: [],
-  sent: {}, extra: {}, showPending: false, q: '', cam: null
+  sent: {}, extra: {}, batch: {}, showPending: false, q: '', cam: null
 };
 
 /* ── 小工具 ────────────────────────────────────────────── */
@@ -106,6 +106,7 @@ function go(id) {
   S.photos = await dbAllPhotos();
   S.sent   = (await kvGet('sent'))  || {};
   S.extra  = (await kvGet('extra')) || {};
+  S.batch  = (await kvGet('batch')) || {};
   const cache = await kvGet('orders');
   if (cache) { S.orders = cache.orders; S.fetchedAt = cache.fetchedAt; }
 
@@ -362,6 +363,9 @@ async function onPicked(e) {
     };
     rec.id = await dbPutPhoto(rec);
     S.photos.push(rec);
+
+    // 記進本批名單：拍到就是出了，之後刪照片也不影響回寫
+    if (!S.batch[order.key]) { S.batch[order.key] = new Date().toISOString(); await kvSet('batch', S.batch); }
 
     toast('');
     showReview(order, boxIdx, rec, base);
@@ -856,18 +860,71 @@ function renderSetup() {
   body.append(clear);
 
   body.append(el('div', 'secTitle', '這批'));
-  const reset = el('button', 'btn ghost wide', '結束這批（標記歸零）');
-  reset.onclick = async () => {
-    if (!confirm('要清空「臨時加入」與「已發送」標記嗎？\n\n照片與相簿都不受影響，只是把計數器歸零，準備開始下一批。')) return;
-    S.extra = {}; S.sent = {};
-    await kvSet('extra', S.extra); await kvSet('sent', S.sent);
-    renderShoot(); renderNotify(); updateBadge();
-    toast('已重設');
-  };
+
+  const bk = Object.keys(S.batch);
+  const bstat = el('div', 'tally');
+  bstat.innerHTML = `<span>本批已拍 <b class="num">${bk.length}</b> 筆訂單</span>`;
+  body.append(bstat);
+
+  const reset = el('button', 'btn wide', '結束這批');
+  reset.onclick = () => finishBatch(reset);
   body.append(reset);
+  body.append(el('div', 'notice calm',
+    '會先把本批拍過照的訂單，在試算表 R 欄寫成「已出貨」；寫入成功才清空臨時加入與已傳送標記。\n寫入失敗時標記不會被清掉，可以直接再按一次。'));
 
   body.append(el('div', 'secTitle', '版本'));
   body.append(el('div', 'notice calm', `${VERSION}　更新後需完全關閉 App 再開啟才會生效。`));
+}
+
+/* ── 結束這批：回寫試算表 → 成功才清標記 ───────────────── */
+async function finishBatch(btn) {
+  const keys = Object.keys(S.batch);
+  if (!keys.length) { toast('本批沒有拍過任何訂單'); return; }
+  if (!cfg.ok) { toast('尚未設定連線'); return; }
+
+  const 未傳 = keys.filter(k => !S.sent[k]).length;
+  const 警語 = 未傳 ? `\n\n注意：還有 ${未傳} 筆沒標記為已傳送，清掉後會失去發送進度。` : '';
+  if (!confirm(`要把這 ${keys.length} 筆在試算表寫成「已出貨」，並清空臨時加入與已傳送標記嗎？${警語}`)) return;
+
+  btn.disabled = true;
+  const 原文 = btn.textContent;
+  btn.textContent = '回寫中…';
+
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 45000);
+  try {
+    const r = await fetch(cfg.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // 避開 CORS 預檢
+      body: JSON.stringify({ action: 'complete', token: cfg.token, keys }),
+      signal: ctl.signal,
+      redirect: 'follow'
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '後端回報失敗');
+
+    // 寫入成功才清標記
+    S.extra = {}; S.sent = {}; S.batch = {};
+    await kvSet('extra', S.extra);
+    await kvSet('sent', S.sent);
+    await kvSet('batch', S.batch);
+
+    await fetchOrders(true);
+    renderShoot(); renderNotify(); renderSetup(); updateBadge();
+
+    let msg = `已寫入 ${j.updated} 筆`;
+    if (j.already) msg += `，${j.already} 筆本來就是已出貨`;
+    if (j.notFound) msg += `\n⚠️ 有 ${j.notFound} 筆在試算表找不到，請人工確認`;
+    toast(msg, j.notFound ? 6000 : 2600);
+
+  } catch (e) {
+    const m = e.name === 'AbortError' ? '連線逾時' : (e.message || '連線失敗');
+    toast(`回寫失敗（${m}）\n標記沒有被清掉，可以再按一次`, 5000);
+  } finally {
+    clearTimeout(timer);
+    btn.disabled = false;
+    btn.textContent = 原文;
+  }
 }
 
 /* ── 匯出 ZIP（備援，主要靠存到相簿）─────────────────────── */
