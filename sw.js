@@ -1,7 +1,7 @@
-/* 波波酪梨 · 出貨通知系統  sw.js  v1.3.1
+/* 波波酪梨 · 出貨通知系統  sw.js  v1.3.2
  * 改版時務必更新 CACHE 名稱，否則舊快取不會被淘汰。
  */
-const CACHE = 'probro-ship-v1.3.1';
+const CACHE = 'probro-ship-v1.3.2';
 
 const ASSETS = [
   './', './index.html', './app.js', './manifest.json',
