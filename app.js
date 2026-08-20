@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.8.0';
+const VERSION = 'v1.8.1';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;
@@ -729,7 +729,7 @@ function renderNotify() {
   body.append(bar);
 
   body.append(el('div', 'notice calm',
-    '「複製文案」與「複製照片」都是放進剪貼簿，到 LINE 長按輸入框貼上即可。\n剪貼簿一次只裝一張圖，多箱訂單會讓你挑；一次要傳多張就用「存相簿」再從相簿鍵挑。'));
+    '流程：按「存相簿」→ 儲存影像 → 到 LINE 官方帳號用相簿鍵挑最新那幾張 → 回來按「複製文案」→ 長按輸入框貼上。\n「複製照片」把圖放進剪貼簿，但官方帳號的輸入框不接受貼上圖片，只有個人 LINE 用得到。'));
 
   const keys = [...new Set(S.photos.map(p => p.orderKey))];
   if (!keys.length) { body.append(el('div', 'empty', '還沒有拍過的照片。')); return; }
@@ -765,17 +765,19 @@ function notifyRow(key) {
 
   const acts = el('div', 'rowActs');
 
+  // 上排＝實際會用到的兩條路，綠色主要按鈕
   const copy = el('button', 'btn xs', '複製文案');
   copy.onclick = () => copyMessage(key);
   acts.append(copy);
 
+  const pic = el('button', 'btn xs', ps.every(p => p.saved) ? '相簿 ✓' : '存相簿');
+  pic.onclick = () => saveToPhotos(key);
+  acts.append(pic);
+
+  // 下排＝次要。複製照片只有個人 LINE 吃得下，官方帳號的輸入框不接受貼上圖片
   const cpImg = el('button', 'btn xs ghost', '複製照片');
   cpImg.onclick = () => copyPhoto(key, cpImg);
   acts.append(cpImg);
-
-  const pic = el('button', 'btn xs ghost', ps.every(p => p.saved) ? '照片 ✓' : '存相簿');
-  pic.onclick = () => saveToPhotos(key);
-  acts.append(pic);
 
   const mark = el('button', 'btn xs ghost', sent ? '取消標記' : '已傳送');
   mark.onclick = async () => {
