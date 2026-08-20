@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.5.1';
+const VERSION = 'v1.7.0';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
@@ -24,6 +24,9 @@ const cfg = {
   set url(v) { localStorage.setItem('gasUrl', v.trim()); },
   get token() { return localStorage.getItem('gasToken') || ''; },
   set token(v) { localStorage.setItem('gasToken', v.trim()); },
+  // 訂單系統（code.gs）的網址。只有工人模式切換會用到，沒填就隱藏該功能。
+  get codeUrl() { return localStorage.getItem('codeUrl') || ''; },
+  set codeUrl(v) { localStorage.setItem('codeUrl', v.trim()); },
   get ok() { return !!(this.url && this.token); }
 };
 
@@ -63,7 +66,7 @@ const kvSet = (k, v) => tx('kv', 'readwrite', s => s.put(v, k));
 /* ── 狀態 ──────────────────────────────────────────────── */
 const S = {
   orders: [], fetchedAt: null, photos: [],
-  sent: {}, extra: {}, batch: {}, showPending: false, q: '', cam: null
+  sent: {}, extra: {}, batch: {}, worker: null, showPending: false, q: '', ship: '', cam: null
 };
 
 /* ── 小工具 ────────────────────────────────────────────── */
@@ -108,7 +111,7 @@ function go(id) {
   S.extra  = (await kvGet('extra')) || {};
   S.batch  = (await kvGet('batch')) || {};
   const cache = await kvGet('orders');
-  if (cache) { S.orders = cache.orders; S.fetchedAt = cache.fetchedAt; }
+  if (cache) { S.orders = cache.orders; S.fetchedAt = cache.fetchedAt; S.worker = cache.worker || null; }
 
   renderShoot(); renderSetup(); updateBadge();
 
@@ -130,8 +133,8 @@ async function fetchOrders(silent) {
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || '後端回報失敗');
 
-    S.orders = j.orders; S.fetchedAt = j.fetchedAt;
-    await kvSet('orders', { orders: j.orders, fetchedAt: j.fetchedAt });
+    S.orders = j.orders; S.fetchedAt = j.fetchedAt; S.worker = j.worker || null;
+    await kvSet('orders', { orders: j.orders, fetchedAt: j.fetchedAt, worker: j.worker || null });
     renderShoot(); renderNotify(); updateBadge();
     // 顯示往返總耗時與後端耗時，兩者差距就是 Google 那段的固定成本
     const 往返 = Date.now() - t0;
@@ -173,6 +176,7 @@ function renderShoot() {
   const search = el('input', 'field');
   search.placeholder = '搜尋姓名'; search.value = S.q; search.style.margin = '0';
   search.oninput = e => { S.q = e.target.value.trim(); renderList(); };
+  search.setAttribute('enterkeyhint', 'done');
   const btnFetch = el('button', 'btn sm ghost', '重新抓取');
   btnFetch.onclick = () => fetchOrders(false);
   bar.append(search, btnFetch);
@@ -200,7 +204,31 @@ function renderList() {
 
   const q = S.q;
   const match = o => !q || o.name.includes(q) || o.phone3.includes(q);
-  const act = activeOrders().filter(match);
+
+  // 配送方式篩選器。只列出這批實際有的方式，沒有的不佔位。
+  const 全部 = activeOrders().filter(match);
+  const 分類 = [];
+  全部.forEach(o => {
+    const k = o.shipShort || '其他';
+    const hit = 分類.find(x => x.key === k);
+    if (hit) hit.n++; else 分類.push({ key: k, n: 1 });
+  });
+  if (S.ship && !分類.some(x => x.key === S.ship)) S.ship = '';   // 篩選對象消失就自動回全部
+
+  if (分類.length > 1) {
+    const chips = el('div', 'chips');
+    const mk = (label, key, n) => {
+      const b = el('button', 'chip' + (S.ship === key ? ' on' : ''));
+      b.innerHTML = `${esc(label)}<span class="num">${n}</span>`;
+      b.onclick = () => { S.ship = key; renderList(); };
+      return b;
+    };
+    chips.append(mk('全部', '', 全部.length));
+    分類.forEach(c => chips.append(mk(c.key, c.key, c.n)));
+    holder.append(chips);
+  }
+
+  const act = S.ship ? 全部.filter(o => (o.shipShort || '其他') === S.ship) : 全部;
 
   const totalBox = act.reduce((s, o) => s + o.boxCount, 0);
   const shotBox  = act.reduce((s, o) => s + shotBoxes(o.key).size, 0);
@@ -216,8 +244,8 @@ function renderList() {
   }
   act.forEach(o => holder.append(orderCard(o)));
 
-  if (act.length) {
-    const miss = act.filter(o => shotBoxes(o.key).size < o.boxCount);
+  if (全部.length) {
+    const miss = 全部.filter(o => shotBoxes(o.key).size < o.boxCount);
     const wrap = el('div'); wrap.style.marginTop = '16px';
     wrap.append(miss.length
       ? el('div', 'notice', `還有 ${miss.length} 筆沒拍完：` +
@@ -237,7 +265,8 @@ function renderList() {
     pend.forEach(o => {
       const b = el('button', 'card');
       b.innerHTML = `<div class="cardHead"><span class="nm">${esc(o.name)}</span>
-        <span class="meta">${esc(o.shipShort)} · ${o.jin}斤 · ${o.boxCount}箱</span></div>`;
+        <span class="meta">${esc(o.shipShort)} · ${o.jin}斤 · ${o.boxCount}箱</span></div>` +
+        (o.store ? `<div class="store">🏪 ${esc(o.store)}</div>` : '');
       b.onclick = async () => {
         S.extra[o.key] = true; await kvSet('extra', S.extra);
         S.showPending = false; S.q = '';
@@ -259,6 +288,8 @@ function orderCard(o) {
   if (S.extra[o.key]) head.append(el('span', 'tagExtra', '臨時'));
   head.append(el('span', 'meta', `${o.shipShort} · ${o.jin}斤`));
   b.append(head);
+
+  if (o.store) b.append(el('div', 'store', '🏪 ' + o.store));
 
   const dots = el('div', 'dots');
   for (let i = 1; i <= o.boxCount; i++) dots.append(el('span', 'dot' + (shot.has(i) ? ' on' : '')));
@@ -828,7 +859,17 @@ function renderSetup() {
     if (await fetchOrders(false)) go('s-shoot');
   };
   body.append(save);
-  body.append(el('div', 'notice calm', '憑證只存在這支手機，填一次就好，不會進入 GitHub。'));
+
+  body.append(el('div', 'secTitle', '訂單系統（選填）'));
+  const cu = el('input', 'field');
+  cu.placeholder = 'code.gs 網頁應用程式網址';
+  cu.value = cfg.codeUrl;
+  cu.onchange = () => { cfg.codeUrl = cu.value; renderSetup(); };
+  body.append(cu);
+  body.append(el('div', 'notice calm',
+    '填了才會出現下方的「開賣控制」。這是訂購網站那支 GAS 的網址，跟上面那支不同。\n憑證只存在這支手機，不會進入 GitHub。'));
+
+  renderWorker(body);
 
   body.append(el('div', 'secTitle', '照片'));
   const stat = el('div', 'tally');
@@ -868,6 +909,90 @@ function renderSetup() {
 
   body.append(el('div', 'secTitle', '版本'));
   body.append(el('div', 'notice calm', `${VERSION}　更新後需完全關閉 App 再開啟才會生效。`));
+}
+
+/* ── 開賣控制：待機／備戰 ─────────────────────────────── */
+function renderWorker(body) {
+  if (!cfg.codeUrl) return;
+
+  body.append(el('div', 'secTitle', '開賣控制'));
+
+  const w = S.worker;
+  if (!w) {
+    body.append(el('div', 'notice calm', '尚未取得工人模式狀態，請先到出貨頁按「重新抓取」。'));
+    return;
+  }
+
+  const stat = el('div', 'tally');
+  stat.innerHTML = `<span>目前 <b>${esc(w.mode)}</b></span>
+    <span>庫存合計 <b class="num">${w.stock}</b> 份</span>`;
+  body.append(stat);
+
+  if (w.warn) {
+    body.append(el('div', 'notice',
+      '⚠️ 有庫存卻在待機模式。背景工人每 10 分鐘才跑一次，推播失敗的訂單收據會晚很久才補上，客人查不到自己的訂單。開賣前請切成備戰。'));
+  }
+
+  const row = el('div', 'bar');
+  const 備戰 = el('button', 'btn sm' + (w.mode === '備戰' ? '' : ' ghost'), '切成備戰');
+  備戰.style.flex = '1';
+  備戰.onclick = () => setWorkerMode('備戰', false, 備戰);
+  const 待機 = el('button', 'btn sm' + (w.mode === '待機' ? '' : ' ghost'), '切成待機');
+  待機.style.flex = '1';
+  待機.onclick = () => setWorkerMode('待機', false, 待機);
+  row.append(備戰, 待機);
+  body.append(row);
+
+  body.append(el('div', 'notice calm',
+    '備戰：背景工人每 1 分鐘跑一次，開賣前後用。\n待機：每 10 分鐘，沒在賣的日子用，省下配額與執行紀錄。'));
+}
+
+async function setWorkerMode(mode, force, btn) {
+  if (!cfg.codeUrl) { toast('尚未填入訂單系統網址'); return; }
+  if (S.worker && S.worker.mode === mode && !force) { toast('目前已經是' + mode); return; }
+
+  btn.disabled = true;
+  const 原文 = btn.textContent;
+  btn.textContent = '切換中…';
+
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 45000);
+  try {
+    const r = await fetch(cfg.codeUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'setWorkerMode', token: cfg.token, mode, force: !!force }),
+      signal: ctl.signal,
+      redirect: 'follow'
+    });
+    const j = await r.json();
+
+    if (!j.success) {
+      // 搶購中切待機 → 後端要求二次確認
+      if (j.needForce) {
+        if (confirm(j.error + '\n\n仍要切成待機嗎？')) {
+          clearTimeout(timer);
+          btn.disabled = false; btn.textContent = 原文;
+          return setWorkerMode(mode, true, btn);
+        }
+        toast('已取消');
+        return;
+      }
+      throw new Error(j.error || '切換失敗');
+    }
+
+    S.worker = { mode: j.mode, stock: j.stock, warn: (j.mode === '待機' && j.stock > 0) };
+    renderSetup();
+    toast(`已切為 ${j.mode}（背景工人每 ${j.intervalMin} 分鐘）`, 2600);
+
+  } catch (e) {
+    const m = e.name === 'AbortError' ? '連線逾時' : (e.message || '連線失敗');
+    toast('切換失敗：' + m, 4000);
+  } finally {
+    clearTimeout(timer);
+    btn.disabled = false;
+    btn.textContent = 原文;
+  }
 }
 
 /* ── 結束這批：回寫試算表 → 成功才清標記 ───────────────── */
