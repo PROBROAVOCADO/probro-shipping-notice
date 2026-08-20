@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.8.1';
+const VERSION = 'v1.9.0';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;
@@ -67,7 +67,8 @@ const kvSet = (k, v) => tx('kv', 'readwrite', s => s.put(v, k));
 /* ── 狀態 ──────────────────────────────────────────────── */
 const S = {
   orders: [], fetchedAt: null, photos: [],
-  sent: {}, extra: {}, batch: {}, worker: null, showPending: false, q: '', ship: '', cam: null
+  sent: {}, extra: {}, batch: {}, made: {}, worker: null,
+  showPending: false, q: '', ship: '', cam: null
 };
 
 /* ── 小工具 ────────────────────────────────────────────── */
@@ -99,6 +100,7 @@ function go(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.toggle('hide', s.id !== id));
   document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-current', b.dataset.go === id ? 'true' : 'false'));
   if (id === 's-notify') renderNotify();
+  if (id === 's-cvs') renderCvs();
   if (id === 's-setup') renderSetup();
 }
 
@@ -111,10 +113,11 @@ function go(id) {
   S.sent   = (await kvGet('sent'))  || {};
   S.extra  = (await kvGet('extra')) || {};
   S.batch  = (await kvGet('batch')) || {};
+  S.made   = (await kvGet('made'))  || {};
   const cache = await kvGet('orders');
   if (cache) { S.orders = cache.orders; S.fetchedAt = cache.fetchedAt; S.worker = cache.worker || null; }
 
-  renderShoot(); renderSetup(); updateBadge();
+  renderShoot(); renderSetup(); updateBadge(); updateCvsBadge();
 
   if (!cfg.ok) { go('s-setup'); toast('請先填入連線設定'); return; }
   if (navigator.onLine) fetchOrders(true);
@@ -136,7 +139,7 @@ async function fetchOrders(silent) {
 
     S.orders = j.orders; S.fetchedAt = j.fetchedAt; S.worker = j.worker || null;
     await kvSet('orders', { orders: j.orders, fetchedAt: j.fetchedAt, worker: j.worker || null });
-    renderShoot(); renderNotify(); updateBadge();
+    renderShoot(); renderNotify(); renderCvs(); updateBadge(); updateCvsBadge();
     // 顯示往返總耗時與後端耗時，兩者差距就是 Google 那段的固定成本
     const 往返 = Date.now() - t0;
     toast(`已更新 ${j.orders.length} 筆（${(往返 / 1000).toFixed(1)} 秒${j.elapsedMs ? '，後端 ' + j.elapsedMs + 'ms' : ''}）`);
@@ -154,7 +157,7 @@ async function fetchOrders(silent) {
 function renderStamp() {
   const stale = S.fetchedAt && (Date.now() - new Date(S.fetchedAt).getTime() > 3 * 3600 * 1000);
   const txt = S.fetchedAt ? `資料時間 ${fmtTime(S.fetchedAt)}` : '尚未取得資料';
-  ['#stamp', '#stamp2'].forEach(sel => {
+  ['#stamp', '#stamp2', '#stamp3'].forEach(sel => {
     const n = $(sel); if (!n) return;
     n.textContent = txt;
     n.classList.toggle('stale', !!stale || !S.fetchedAt);
@@ -899,6 +902,112 @@ async function shareOrder(key) {
   }
 }
 
+/* ── 超取建單 ──────────────────────────────────────────
+ * 跟拍照是完全不同的作業：坐著、在兩個 App 之間切換、
+ * 一個客人要複製三次。所以獨立一頁，不塞進出貨清單。
+ */
+const cvsOrders = () => activeOrders().filter(o => o.shipShort === '7-11');
+
+function updateCvsBadge() {
+  const n = cvsOrders().filter(o => !S.made[o.key]).length;
+  const b = $('#badgeCvs');
+  if (!b) return;
+  b.textContent = n; b.classList.toggle('hide', !n);
+}
+
+function renderCvs() {
+  const body = $('#cvsBody');
+  if (!body) return;
+  renderStamp();
+  body.innerHTML = '';
+
+  const bar = el('div', 'bar');
+  const f = el('button', 'btn sm ghost', '重新抓取');
+  f.onclick = () => fetchOrders(false);
+  bar.append(f);
+  body.append(bar);
+
+  const list = cvsOrders();
+  if (!list.length) {
+    body.append(el('div', 'empty', '這批沒有標記「出貨準備」的 7-11 訂單。'));
+    return;
+  }
+
+  const 待辦 = list.filter(o => !S.made[o.key]);
+  const 完成 = list.filter(o => S.made[o.key]);
+
+  const tally = el('div', 'tally');
+  tally.innerHTML = `<span>7-11 <b class="num">${list.length}</b> 筆</span>
+    <span>已建單 <b class="num">${完成.length}/${list.length}</b></span>`;
+  body.append(tally);
+
+  body.append(el('div', 'notice calm',
+    '點欄位右邊的「複製」把內容放進剪貼簿，切到 7-11 系統貼上。建完按「已建單」讓它下沉，清單會越來越短。'));
+
+  待辦.forEach(o => body.append(cvsCard(o)));
+  if (完成.length) {
+    body.append(el('div', 'secTitle', `已建單 ${完成.length}`));
+    完成.forEach(o => body.append(cvsCard(o)));
+  }
+}
+
+function cvsCard(o) {
+  const done = !!S.made[o.key];
+  const card = el('div', 'cvsCard' + (done ? ' done' : ''));
+
+  const head = el('div', 'cardHead');
+  head.innerHTML = `<span class="nm">${esc(o.name)}</span>`;
+  head.append(el('span', 'meta', `${o.jin}斤 · ${o.boxCount}箱`));
+  card.append(head);
+
+  const 欄位 = (標籤, 值) => {
+    if (!值) return;
+    const r = el('div', 'cvsRow');
+    r.innerHTML = `<span class="cvsLabel">${esc(標籤)}</span><span class="cvsVal">${esc(值)}</span>`;
+    const b = el('button', 'btn xs ghost', '複製');
+    b.onclick = () => copyText(值, `已複製${標籤}`);
+    r.append(b);
+    card.append(r);
+  };
+
+  欄位('姓名', o.name);
+  欄位('手機', o.phone);
+  if (o.storeCode) {
+    欄位('店號', o.storeCode);
+    欄位('店名', o.storeName);
+  } else {
+    欄位('門市', o.store);
+  }
+
+  const mark = el('button', 'btn sm' + (done ? ' ghost' : '') + ' wide', done ? '取消建單標記' : '已建單');
+  mark.style.marginTop = '10px';
+  mark.onclick = async () => {
+    if (S.made[o.key]) delete S.made[o.key];
+    else S.made[o.key] = new Date().toISOString();
+    await kvSet('made', S.made);
+    renderCvs(); updateCvsBadge();
+  };
+  card.append(mark);
+  return card;
+}
+
+/** 複製純文字，失敗時退回可手動選取的方式 */
+async function copyText(text, okMsg) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(okMsg || '已複製');
+  } catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:45%;left:5%;width:90%;font-size:17px;z-index:99';
+    document.body.append(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e2) {}
+    setTimeout(() => ta.remove(), 60);
+    toast(ok ? (okMsg || '已複製') : '無法自動複製，請長按選取', 3000);
+  }
+}
+
 /* ── 設定畫面 ──────────────────────────────────────────── */
 function renderSetup() {
   const body = $('#setupBody');
@@ -1102,10 +1211,11 @@ async function finishBatch(btn) {
     if (!j.ok) throw new Error(j.error || '後端回報失敗');
 
     // 寫入成功才清標記
-    S.extra = {}; S.sent = {}; S.batch = {};
+    S.extra = {}; S.sent = {}; S.batch = {}; S.made = {};
     await kvSet('extra', S.extra);
     await kvSet('sent', S.sent);
     await kvSet('batch', S.batch);
+    await kvSet('made', S.made);
 
     // 只刪已存過相簿的副本；沒存過的一律保留
     const 待刪 = S.photos.filter(p => p.saved);
