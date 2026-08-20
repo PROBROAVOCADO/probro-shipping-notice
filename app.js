@@ -1,10 +1,11 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.7.0';
+const VERSION = 'v1.8.0';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
-const MAX_EDGE   = 2200;    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
+const MAX_EDGE   = 2200;
+const CLIP_EDGE  = 1800;    // 複製到剪貼簿時的長邊上限（PNG 無壓縮，原尺寸太肥）    // 長邊上限，避免原生相機的 12MP 原圖塞爆 IndexedDB
 const OV_MIN = 0.022, OV_MAX = 0.085;   // 字級比例上下限
 
 /* 疊字位置／字級：拖曳調整後記住，成為後續照片的預設 */
@@ -728,7 +729,7 @@ function renderNotify() {
   body.append(bar);
 
   body.append(el('div', 'notice calm',
-    '「複製文案」把這筆文案放進剪貼簿，到 LINE 官方帳號長按輸入框貼上。「存相簿」把這筆照片送進相簿，再從聊天室的相簿鍵挑最新那幾張。'));
+    '「複製文案」與「複製照片」都是放進剪貼簿，到 LINE 長按輸入框貼上即可。\n剪貼簿一次只裝一張圖，多箱訂單會讓你挑；一次要傳多張就用「存相簿」再從相簿鍵挑。'));
 
   const keys = [...new Set(S.photos.map(p => p.orderKey))];
   if (!keys.length) { body.append(el('div', 'empty', '還沒有拍過的照片。')); return; }
@@ -768,6 +769,10 @@ function notifyRow(key) {
   copy.onclick = () => copyMessage(key);
   acts.append(copy);
 
+  const cpImg = el('button', 'btn xs ghost', '複製照片');
+  cpImg.onclick = () => copyPhoto(key, cpImg);
+  acts.append(cpImg);
+
   const pic = el('button', 'btn xs ghost', ps.every(p => p.saved) ? '照片 ✓' : '存相簿');
   pic.onclick = () => saveToPhotos(key);
   acts.append(pic);
@@ -782,6 +787,71 @@ function notifyRow(key) {
 
   row.append(acts);
   return row;
+}
+
+/**
+ * 複製照片到剪貼簿，貼進 LINE 輸入框用。
+ *
+ * 兩個平台限制：
+ *   1. Safari 的剪貼簿只接受 image/png，所以要在複製當下把 JPEG 轉成 PNG
+ *   2. 剪貼簿一次只裝得下一張 → 多箱訂單先讓使用者挑
+ *
+ * ⚠️ ClipboardItem 必須「同步建立」並傳入 Promise，不能先 await 再 write ——
+ *    await 之後就脫離使用者手勢，Safari 會直接拒絕。
+ */
+async function copyPhoto(key, btn) {
+  const ps = photosOf(key);
+  if (!ps.length) { toast('這筆沒有照片'); return; }
+  if (typeof ClipboardItem === 'undefined' || !navigator.clipboard || !navigator.clipboard.write) {
+    toast('這台裝置不支援複製圖片，請改用「存相簿」', 3400);
+    return;
+  }
+  if (ps.length === 1) return 寫入剪貼簿_(ps[0], btn);
+
+  // 多箱 → 挑一張
+  const wrap = el('div', 'sheet');
+  const body = el('div', 'sheetBody');
+  body.append(el('h2', '', '複製哪一箱的照片？'));
+  body.append(el('p', '', '剪貼簿一次只能放一張，傳完再回來複製下一箱。'));
+  ps.forEach(p => {
+    const b = el('button', 'boxBtn');
+    b.innerHTML = `<b>第 ${p.boxIdx} 箱／共 ${p.boxCount} 箱</b><span>${esc(p.filename)}</span>`;
+    b.onclick = () => { wrap.remove(); 寫入剪貼簿_(p, btn); };
+    body.append(b);
+  });
+  const c = el('button', 'btn ghost wide', '取消');
+  c.onclick = () => wrap.remove();
+  body.append(c);
+  wrap.append(body);
+  wrap.onclick = e => { if (e.target === wrap) wrap.remove(); };
+  document.body.append(wrap);
+}
+
+function 寫入剪貼簿_(photo, btn) {
+  const 原文 = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '轉檔中…'; }
+
+  // 注意：這裡不能 await，要把 Promise 直接交給 ClipboardItem
+  const png = 轉PNG_(photo.stamped);
+
+  return navigator.clipboard.write([new ClipboardItem({ 'image/png': png })])
+    .then(() => toast('照片已複製，到 LINE 長按輸入框貼上', 2800))
+    .catch(err => toast('複製圖片失敗：' + (err.message || '未知錯誤') + '\n可改用「存相簿」', 4000))
+    .then(() => { if (btn) { btn.disabled = false; btn.textContent = 原文; } });
+}
+
+async function 轉PNG_(blob) {
+  const src = await decodeImage(blob);
+  const sw = src.width || src.naturalWidth, sh = src.height || src.naturalHeight;
+  const scale = Math.min(1, CLIP_EDGE / Math.max(sw, sh));
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(sw * scale);
+  cv.height = Math.round(sh * scale);
+  cv.getContext('2d').drawImage(src, 0, 0, cv.width, cv.height);
+  if (src.close) src.close();
+  return new Promise((res, rej) => {
+    cv.toBlob(b => b ? res(b) : rej(new Error('轉檔失敗')), 'image/png');
+  });
 }
 
 /** 只複製文案，不動照片。複製成功即視為已處理，讓清單自我收斂。 */
