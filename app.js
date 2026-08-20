@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.9.0';
+const VERSION = 'v1.9.1';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;
@@ -626,7 +626,8 @@ const toBlob = (canvas, q) => new Promise(res => canvas.toBlob(res, 'image/jpeg'
 /* ── 疊字 ──────────────────────────────────────────────── */
 function overlayLines(o, boxIdx) {
   const box = o.boxes.find(b => b.idx === boxIdx) || o.boxes[0];
-  const lines = [o.name];
+  // 第一行帶配送方式：封箱後要分堆時，一眼就知道這箱走哪一家
+  const lines = [o.shipShort ? `${o.name} · ${o.shipShort}` : o.name];
   if (box) lines.push(`${box.weight ? box.weight + '斤｜' : ''}${box.items}`);
   if (o.boxCount > 1) lines.push(`第${boxIdx}箱／共${o.boxCount}箱`);
   return lines;
