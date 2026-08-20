@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.9.1';
+const VERSION = 'v1.10.0';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;
@@ -92,6 +92,49 @@ function fmtTime(iso) {
   return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 const safeName = s => String(s || '').replace(/[\\/:*?"<>|\s]+/g, '').slice(0, 20) || '無名';
+
+/**
+ * 把一箱的品項換算成檔名用的斤兩縮寫。
+ * 規則：只看等級不看品種，同級的斤數相加。A＝優級、B＝次級。
+ *   當季【優】3斤×1、當季【次】5斤×1、平克【次】2斤×1 → A3B7
+ */
+function 規格縮寫_(items) {
+  let A = 0, B = 0;
+  const re = /【\s*(優|次)\s*】[^【]*?([\d.]+)\s*斤(?:\s*[×xX*]\s*(\d+))?/g;
+  let m;
+  while ((m = re.exec(String(items || '')))) {
+    const 斤 = parseFloat(m[2]) || 0;
+    const 件 = m[3] ? parseInt(m[3], 10) : 1;
+    if (m[1] === '優') A += 斤 * 件; else B += 斤 * 件;
+  }
+  const 數 = n => String(Math.round(n * 10) / 10).replace(/\.0$/, '');
+  return (A > 0 ? 'A' + 數(A) : '') + (B > 0 ? 'B' + 數(B) : '');
+}
+
+/** 出貨日期（拍照當天），檔名用 */
+function 出貨日_(ts) {
+  const d = ts ? new Date(ts) : new Date();
+  const p = n => ('0' + n).slice(-2);
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+}
+
+/**
+ * 匯出／分享前確保檔名不重複。
+ * 新檔名規則不含識別碼，同一人同一天同規格是有可能撞名的
+ * （例如同一位客人下了兩筆一模一樣的訂單）。撞到就加序號，
+ * 不要讓其中一張在 ZIP 裡被靜默覆蓋掉。
+ */
+function 唯一檔名_(用過, name) {
+  if (!用過[name]) { 用過[name] = 1; return name; }
+  const i = name.lastIndexOf('.');
+  const 主 = i > 0 ? name.slice(0, i) : name;
+  const 副 = i > 0 ? name.slice(i) : '';
+  let n = 2;
+  while (用過[主 + '-' + n + 副]) n++;
+  const 新 = 主 + '-' + n + 副;
+  用過[新] = 1;
+  return 新;
+}
 const boxLabel = b => `${CIRCLE[b.idx - 1] || b.idx} ${b.weight ? b.weight + '斤｜' : ''}${b.items}`;
 
 /* ── 導覽 ──────────────────────────────────────────────── */
@@ -393,8 +436,11 @@ async function onPicked(e) {
     for (const p of old) await dbDelPhoto(p.id);
     S.photos = S.photos.filter(p => !(p.orderKey === order.key && p.boxIdx === boxIdx));
 
-    const fname = safeName(order.name) + '_' + order.phone3 + '_' + order.orderDate + '_' + order.key4
-               + (order.boxCount > 1 ? `_${boxIdx}of${order.boxCount}` : '');
+    // 檔名：出貨日期-姓名-斤兩縮寫[-第幾箱]
+    const box0 = order.boxes.find(b => b.idx === boxIdx) || order.boxes[0];
+    const 規格 = 規格縮寫_(box0 && box0.items) || (box0 && box0.weight ? box0.weight + '斤' : '');
+    const fname = [出貨日_(), safeName(order.name), 規格].filter(Boolean).join('-')
+               + (order.boxCount > 1 ? `-${boxIdx}of${order.boxCount}` : '');
     const rec = {
       orderKey: order.key, boxIdx, boxCount: order.boxCount, name: order.name,
       ts: new Date().toISOString(), filename: fname + '.jpg', stamped, saved: 0
@@ -698,7 +744,8 @@ async function saveToPhotos(keyOrNull) {
   const list = keyOrNull ? photosOf(keyOrNull) : unsaved();
   if (!list.length) { toast('沒有待存的照片'); return; }
 
-  const files = list.map(p => new File([p.stamped], p.filename, { type: 'image/jpeg' }));
+  const 用過 = {};
+  const files = list.map(p => new File([p.stamped], 唯一檔名_(用過, p.filename), { type: 'image/jpeg' }));
   if (!(navigator.canShare && navigator.canShare({ files }))) {
     toast('這台裝置不支援存到相簿，請改用匯出 ZIP', 3400); return;
   }
@@ -1059,13 +1106,32 @@ function renderSetup() {
     <span>未存相簿 <b class="num">${unsaved().length}</b> 張</span>`;
   body.append(stat);
 
-  const s1 = el('button', 'btn wide', '把未存的照片存到相簿');
-  s1.style.marginBottom = '10px';
-  s1.onclick = () => saveToPhotos();
-  const s2 = el('button', 'btn ghost wide', '匯出全部照片 ZIP');
-  s2.style.marginBottom = '10px';
-  s2.onclick = () => exportZip();
-  body.append(s1, s2);
+  const ICON_相簿 = '<svg viewBox="0 0 24 24"><rect x="3" y="3.5" width="18" height="12.5" rx="3"/>' +
+    '<path d="M3.4 13.2 7 9.8a2 2 0 0 1 2.7 0l3 2.8"/>' +
+    '<path d="M14 12.2l1.4-1.3a2 2 0 0 1 2.7 0l2.5 2.3"/>' +
+    '<circle cx="15.7" cy="7.6" r="1.3"/>' +
+    '<path d="M12 17.5v4.2M9.4 19.4 12 22l2.6-2.6"/></svg>';
+
+  const ICON_匯出 = '<svg viewBox="0 0 24 24"><path d="M3 6.5h18v3.2H3z"/>' +
+    '<path d="M4.6 9.7v9.8a1 1 0 0 0 1 1h12.8a1 1 0 0 0 1-1V9.7"/>' +
+    '<path d="M12 18.4v-5.6M9.4 14.9 12 12.3l2.6 2.6"/></svg>';
+
+  const iconBtn = (icon, label, primary, badge, fn) => {
+    const wrap = el('button', 'iconBtn');
+    const c = el('span', 'iconCircle' + (primary ? '' : ' alt'));
+    c.innerHTML = icon;
+    if (badge) c.append(el('span', 'iconBadge', String(badge)));
+    wrap.append(c, el('span', 'iconLabel', label));
+    wrap.onclick = fn;
+    return wrap;
+  };
+
+  const row = el('div', 'iconRow');
+  row.append(
+    iconBtn(ICON_相簿, '把未存的照片存到相簿', true, unsaved().length, () => saveToPhotos()),
+    iconBtn(ICON_匯出, '匯出全部照片', false, 0, () => exportZip())
+  );
+  body.append(row);
 
   body.append(el('div', 'notice',
     'iOS 在儲存空間吃緊時會清掉網站資料。當天存到相簿，不要累積一整季在 App 裡。\n存過相簿的副本會在收工時自動清掉，不需要手動處理。'));
@@ -1259,7 +1325,8 @@ async function exportZip() {
   catch (e) { toast('載入壓縮元件失敗，請連上網路後再試', 3400); return; }
 
   const zip = new JSZip();
-  for (const p of S.photos) zip.file(p.filename, p.stamped);
+  const 用過 = {};
+  for (const p of S.photos) zip.file(唯一檔名_(用過, p.filename), p.stamped);
   const blob = await zip.generateAsync({ type: 'blob' });
   const d = new Date(), pz = n => ('0' + n).slice(-2);
   const fname = `波波酪梨_出貨照片_${d.getFullYear()}${pz(d.getMonth() + 1)}${pz(d.getDate())}.zip`;
