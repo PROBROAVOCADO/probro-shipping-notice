@@ -1,7 +1,7 @@
 /* 波波酪梨 · 出貨通知系統  app.js  v1.1.0 */
 'use strict';
 
-const VERSION = 'v1.10.0';
+const VERSION = 'v1.10.1';
 const JSZIP_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
 const FONT_RATIO = 0.042;   // 疊字字級 ÷ 圖寬
 const MAX_EDGE   = 2200;
@@ -185,7 +185,11 @@ async function fetchOrders(silent) {
     renderShoot(); renderNotify(); renderCvs(); updateBadge(); updateCvsBadge();
     // 顯示往返總耗時與後端耗時，兩者差距就是 Google 那段的固定成本
     const 往返 = Date.now() - t0;
-    toast(`已更新 ${j.orders.length} 筆（${(往返 / 1000).toFixed(1)} 秒${j.elapsedMs ? '，後端 ' + j.elapsedMs + 'ms' : ''}）`);
+    // 講「出貨準備」幾筆才有意義；orders.length 含尚未出貨的，容易誤讀
+    const 準備 = (j.counts && j.counts.ready !== undefined)
+      ? j.counts.ready
+      : j.orders.filter(o => o.status === '出貨準備').length;
+    toast(`出貨準備 ${準備} 筆（讀取 ${j.orders.length} 筆／${(往返 / 1000).toFixed(1)} 秒）`);
     return true;
   } catch (e) {
     const msg = e.name === 'AbortError' ? '連線逾時（GAS 可能在冷啟動，再按一次通常就好）' : (e.message || '連線失敗');
@@ -806,15 +810,38 @@ function notifyRow(key) {
 
   const main = el('div', 'rowMain');
   main.append(el('div', 'nm', o ? o.name : ps[0].name));
-  if (!o) main.append(el('div', 'rowMeta warn', '這筆訂單已不在清單中，請重新抓取'));
+
+  // 訂單已被標成已出貨、或已從清單移除 → GAS 不再回傳它。
+  // 這種孤兒照片沒有文案可用，只能存相簿或刪掉，否則會永遠卡在這裡。
+  const 孤兒 = !o;
+  if (孤兒) main.append(el('div', 'rowMeta warn', '訂單已完成或不在清單中'));
   else if (o.messageMissing) main.append(el('div', 'rowMeta warn', '⚠️ 試算表沒有文案，請檢查「出貨通知」分頁'));
   else {
-    main.append(el('div', 'rowMeta', `${ps.length} 張 · ${o.boxCount} 箱 · ${o.points} 點`));
+    main.append(el('div', 'rowMeta', `${ps.length} 張 · ${o.boxCount} 箱`));
     if (/需人工發放/.test(o.message)) main.append(el('div', 'rowMeta warn', '⚠️ 集點需人工發放'));
   }
   row.append(main);
 
   const acts = el('div', 'rowActs');
+
+  if (孤兒) {
+    const pic = el('button', 'btn xs', ps.every(p => p.saved) ? '相簿 ✓' : '存相簿');
+    pic.onclick = () => saveToPhotos(key);
+    acts.append(pic);
+
+    const cp = el('button', 'btn xs ghost', '複製照片');
+    cp.onclick = () => copyPhoto(key, cp);
+    acts.append(cp);
+
+    const del = el('button', 'btn xs ghost', '刪除');
+    del.style.color = 'var(--alert)';
+    del.style.borderColor = '#EDCFC9';
+    del.onclick = () => 刪除本筆照片(key, ps);
+    acts.append(del);
+
+    row.append(acts);
+    return row;
+  }
 
   // 上排＝實際會用到的兩條路，綠色主要按鈕
   const copy = el('button', 'btn xs', '複製文案');
@@ -927,6 +954,22 @@ async function copyMessage(key) {
   if (!S.sent[key]) { S.sent[key] = new Date().toISOString(); await kvSet('sent', S.sent); }
   renderNotify(); updateBadge();
   toast(`已複製 ${o.name} 的文案`);
+}
+
+/** 刪除某一筆的所有照片，連同標記一起清乾淨 */
+async function 刪除本筆照片(key, ps) {
+  const 未存 = ps.filter(p => !p.saved).length;
+  const 警語 = 未存 ? `\n\n⚠️ 其中 ${未存} 張還沒存到相簿，刪掉就沒了。` : '';
+  if (!confirm(`要刪除這筆的 ${ps.length} 張照片嗎？${警語}`)) return;
+
+  for (const p of ps) await dbDelPhoto(p.id);
+  S.photos = S.photos.filter(p => p.orderKey !== key);
+  delete S.sent[key]; delete S.batch[key];
+  await kvSet('sent', S.sent);
+  await kvSet('batch', S.batch);
+
+  renderNotify(); renderShoot(); renderSetup(); updateBadge();
+  toast('已刪除');
 }
 
 async function shareOrder(key) {
